@@ -23,6 +23,7 @@ EVENTS_WRITE_INFO = "Events-Write-Encryption-Key"
 EVENTS_READ_INFO = "Events-Read-Encryption-Key"
 
 FEEDBACK_INTERVAL = 2.0  # Seconds
+PLAYBACK_START_TIMEOUT = 30.0  # Seconds
 
 HEADERS = {
     "User-Agent": "AirPlay/550.10",
@@ -62,7 +63,9 @@ class AirPlayV2(StreamProtocol, EventChannelListener):
         self._item_uuid = str(uuid4()).upper()
         # The receiver reports playback state on the event channel rather than
         # answering GET /playback-info, so end of media is signalled here.
-        self._media_ended: asyncio.Event = asyncio.Event()
+        self._playback_started = False
+        self._media_ready = asyncio.Event()
+        self._media_ended = asyncio.Event()
 
         self.uuid = str(uuid4())
 
@@ -353,21 +356,37 @@ class AirPlayV2(StreamProtocol, EventChannelListener):
     def handle_event(self, event: Mapping[str, Any]) -> None:
         """Handle an event pushed by the receiver on the event channel."""
         kind = event.get("type")
+        name = event.get("name")
         if kind == "playbackState":
-            state = event.get("name")
-            _LOGGER.debug("Playback state: %s", state)
-            # A replacement goes playing -> loading -> playing, so "stopped" is
-            # only reported when nothing is playing any more.
-            if state == "stopped":
+            _LOGGER.debug("Playback state: %s", name)
+            if name == "playing":
+                self._playback_started = True
+                self._media_ready.set()
+            elif name in ("stopped", "idle") and self._playback_started:
                 self._media_ended.set()
         elif kind == "notification":
-            _LOGGER.debug("Playback notification: %s", event.get("name"))
+            _LOGGER.debug("Playback notification: %s", name)
+            if name == "itemPlayedToEnd":
+                self._playback_started = True
+                self._media_ready.set()
+                self._media_ended.set()
+
+    def handle_event_channel_closed(self) -> None:
+        """Unblock playback when the receiver stops sending events."""
+        self._media_ready.set()
+        self._media_ended.set()
 
     async def wait_for_media_end(self) -> bool:
         """Wait until the receiver reports that playback finished."""
         if self._rcs_stream_id is None:
             return False
 
+        try:
+            await asyncio.wait_for(self._media_ready.wait(), PLAYBACK_START_TIMEOUT)
+        except asyncio.TimeoutError as exc:
+            raise exceptions.PlaybackError("AirPlay video did not start") from exc
+        if not self._playback_started:
+            raise exceptions.PlaybackError("AirPlay closed before video started")
         await self._media_ended.wait()
         return True
 

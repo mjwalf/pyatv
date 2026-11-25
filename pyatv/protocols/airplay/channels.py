@@ -63,6 +63,9 @@ class EventChannelListener(ABC):
     def handle_event(self, event: Mapping[str, Any]) -> None:
         """Handle an event pushed by the receiver."""
 
+    def handle_event_channel_closed(self) -> None:
+        """Handle the loss of the event channel."""
+
 
 class EventChannel(BaseEventChannel):
     """Connection used to handle the event channel.
@@ -86,8 +89,6 @@ class EventChannel(BaseEventChannel):
                     break
 
                 _LOGGER.debug("Got message on event channel: %s", request)
-                self._dispatch_event(request)
-
                 # Send a positive response to satisfy the other end of the channel
                 headers = {
                     "Content-Length": "0",
@@ -109,8 +110,15 @@ class EventChannel(BaseEventChannel):
                         )
                     )
                 )
+                self._dispatch_event(request)
             except Exception:
                 _LOGGER.exception("Failed to handle message on event channel")
+
+    def connection_lost(self, exc: Optional[Exception]) -> None:
+        """Notify the playback listener that no further events can arrive."""
+        super().connection_lost(exc)
+        if self.listener is not None:
+            self.listener.handle_event_channel_closed()
 
     def _dispatch_event(self, request: HttpRequest) -> None:
         """Decode an event and hand it to the listener, if any."""
@@ -125,7 +133,8 @@ class EventChannel(BaseEventChannel):
         outer = decode_plist_body(body)
         if not isinstance(outer, dict):
             return
-        data = outer.get("params", {}).get("data")
+        params = outer.get("params")
+        data = params.get("data") if isinstance(params, dict) else None
         event = decode_plist_body(data) if isinstance(data, bytes) else outer
         if isinstance(event, dict):
             self.listener.handle_event(event)
