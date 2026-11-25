@@ -130,7 +130,14 @@ class AirPlayV2(StreamProtocol, EventChannelListener):
 
     async def setup(self, timing_server_port: int, control_client_port: int) -> None:
         """To setup connection prior to starting to stream."""
-        await self._setup_base(timing_server_port)
+        try:
+            await self._setup_base(timing_server_port)
+        except exceptions.HttpError as exc:
+            if exc.status_code != 400:
+                raise
+            # Some Apple TVs reject the NTP session but accept the same
+            # audio stream once the control connection uses PTP.
+            await self._setup_ptp_session()
         await self.setup_audio_stream(control_client_port)
 
     async def setup_audio_stream(self, control_client_port: int) -> None:
@@ -232,8 +239,8 @@ class AirPlayV2(StreamProtocol, EventChannelListener):
 
         return self.context.rtpseq, packet
 
-    async def _setup_video_session(self) -> None:
-        """Set up a session for video playback.
+    async def _setup_ptp_session(self) -> None:
+        """Set up a PTP-timed playback session.
 
         Video sessions are timed with PTP and carry a peer list, unlike the NTP
         based setup used for audio streaming.
@@ -405,7 +412,7 @@ class AirPlayV2(StreamProtocol, EventChannelListener):
         )
 
         try:
-            await self._setup_video_session()
+            await self._setup_ptp_session()
         except exceptions.HttpError as ex:
             # Receivers that predate PTP timed video sessions reject this setup.
             # Fall back to the audio style setup, which is what /play expects.
