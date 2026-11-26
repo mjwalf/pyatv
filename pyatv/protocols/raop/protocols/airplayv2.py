@@ -48,11 +48,17 @@ RCS_CLIENT_TYPE_UUID = "A6B27562-B43A-4F2D-B75F-82391E250194"
 class AirPlayV2(StreamProtocol, EventChannelListener):
     """Stream protocol used for AirPlay v1 support."""
 
-    def __init__(self, context: StreamContext, rtsp: RtspSession) -> None:
+    def __init__(
+        self, context: StreamContext, rtsp: RtspSession,
+        receiver_psi: Optional[str] = None,
+    ) -> None:
         """Initialize a new AirPlayV2 instance."""
         super().__init__()
         self.context = context
         self.rtsp = rtsp
+        self._receiver_psi = receiver_psi
+        self._using_advertised_psi = False
+        self._buffer_ready = asyncio.Event()
         self.event_channel: Optional[asyncio.BaseTransport] = None
         self._verifier: Optional[PairVerifyProcedure] = None
         self._cipher: Optional[Chacha20Cipher] = None
@@ -308,7 +314,8 @@ class AirPlayV2(StreamProtocol, EventChannelListener):
         """
         try:
             info = decode_bplist_from_body(await self.rtsp.connection.get("/info"))
-            psi = info.get("psi")
+            self._using_advertised_psi = not info.get("psi") and bool(self._receiver_psi)
+            psi = info.get("psi") or self._receiver_psi
         except Exception:  # pylint: disable=broad-except
             _LOGGER.debug("Failed to read /info", exc_info=True)
             return False
@@ -367,12 +374,15 @@ class AirPlayV2(StreamProtocol, EventChannelListener):
         if kind == "playbackState":
             _LOGGER.debug("Playback state: %s", name)
             if name == "playing":
+                self._buffer_ready.set()
                 self._playback_started = True
                 self._media_ready.set()
             elif name in ("stopped", "idle") and self._playback_started:
                 self._media_ended.set()
         elif kind == "notification":
             _LOGGER.debug("Playback notification: %s", name)
+            if name == "playbackLikelyToKeepUp":
+                self._buffer_ready.set()
             if name == "itemPlayedToEnd":
                 self._playback_started = True
                 self._media_ready.set()
@@ -484,6 +494,16 @@ class AirPlayV2(StreamProtocol, EventChannelListener):
         )
         # Playback starts paused without this.
         await self.send_command({"type": "setRate", "rate": 1.0})
+        # Some TVs accept the initial rate while loading but apply it only
+        # after their player has buffered the stream.
+        if self._using_advertised_psi:
+            try:
+                await asyncio.wait_for(self._buffer_ready.wait(), 7)
+            except asyncio.TimeoutError:
+                pass
+            else:
+                if not self._playback_started:
+                    await self.send_command({"type": "setRate", "rate": 1.0})
         return resp
 
     async def _play_url_legacy(self, url: str, position: float) -> HttpResponse:

@@ -162,7 +162,9 @@ class AirPlayStream(Stream):  # pylint: disable=too-few-public-methods
             == AirPlayMajorVersion.AirPlayV1
         ):
             return airplayv1.AirPlayV1(context, rtsp)
-        return airplayv2.AirPlayV2(context, rtsp)
+        return airplayv2.AirPlayV2(
+            context, rtsp, receiver_psi=service.properties.get("psi")
+        )
 
 
 class AirPlayRemoteControl(RemoteControl):
